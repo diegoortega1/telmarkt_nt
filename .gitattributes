@@ -1,0 +1,9 @@
+# Normaliza todo a LF en el repositorio (independiente del OS del desarrollador)
+* text=auto eol=lf
+
+# Binarios — sin conversión
+*.jar   binary
+*.webp  binary
+*.png   binary
+*.jpg   binary
+*.gif   binary
