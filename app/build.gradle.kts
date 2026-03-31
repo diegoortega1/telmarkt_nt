@@ -6,13 +6,13 @@ plugins {
 }
 
 android {
-  namespace = "com.example.telmarktnt"
+  namespace = "com.muxunav.telmarktandroid"
   compileSdk {
     version = release(36)
   }
 
   defaultConfig {
-    applicationId = "com.example.telmarktnt"
+    applicationId = "com.muxunav.telmarktandroid"
     minSdk = 24
     targetSdk = 36
     versionCode = 1
