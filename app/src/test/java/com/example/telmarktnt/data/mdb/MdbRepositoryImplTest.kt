@@ -5,18 +5,23 @@ import com.example.telmarktnt.domain.model.MdbState
 import io.mockk.every
 import io.mockk.mockk
 import io.mockk.verify
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.test.StandardTestDispatcher
-import kotlinx.coroutines.test.TestScope
+import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.runTest
+import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Before
 import org.junit.Test
 
 class MdbRepositoryImplTest {
 
-    private val testDispatcher = StandardTestDispatcher()
-    private val testScope = TestScope(testDispatcher)
+    private val testDispatcher = UnconfinedTestDispatcher()
+
+    // Scope separado del TestScope para que el collectJob no sea hijo del runTest
+    private val repoScope = CoroutineScope(testDispatcher + SupervisorJob())
 
     private lateinit var repository: MdbRepositoryImpl
     private lateinit var fakeServiceState: MutableStateFlow<MdbState>
@@ -27,21 +32,24 @@ class MdbRepositoryImplTest {
         mockService = mockk(relaxed = true) {
             every { state } returns fakeServiceState
         }
-        repository = MdbRepositoryImpl(testScope)
+        repository = MdbRepositoryImpl(repoScope)
+    }
+
+    @After fun tearDown() {
+        repoScope.cancel()
     }
 
     @Test fun `estado inicial es Idle`() {
         assertEquals(MdbState.Idle, repository.state.value)
     }
 
-    @Test fun `onServiceConnected empieza a recolectar estado del service`() = testScope.runTest {
+    @Test fun `onServiceConnected empieza a recolectar estado del service`() = runTest(testDispatcher) {
         repository.onServiceConnected(mockService)
         fakeServiceState.value = MdbState.ReaderEnabled
-        testScheduler.advanceUntilIdle()
         assertEquals(MdbState.ReaderEnabled, repository.state.value)
     }
 
-    @Test fun `los cambios de estado del service se propagan al repositorio`() = testScope.runTest {
+    @Test fun `los cambios de estado del service se propagan al repositorio`() = runTest(testDispatcher) {
         repository.onServiceConnected(mockService)
         repository.state.test {
             assertEquals(MdbState.Idle, awaitItem())
@@ -56,24 +64,20 @@ class MdbRepositoryImplTest {
         }
     }
 
-    @Test fun `onServiceDisconnected cancela la recolección y resetea a Idle`() = testScope.runTest {
+    @Test fun `onServiceDisconnected cancela la recolección y resetea a Idle`() = runTest(testDispatcher) {
         repository.onServiceConnected(mockService)
         fakeServiceState.value = MdbState.ReaderEnabled
-        testScheduler.advanceUntilIdle()
 
         repository.onServiceDisconnected()
-        testScheduler.advanceUntilIdle()
 
         assertEquals(MdbState.Idle, repository.state.value)
     }
 
-    @Test fun `onServiceDisconnected evita que cambios posteriores del service afecten el estado`() = testScope.runTest {
+    @Test fun `onServiceDisconnected evita que cambios posteriores del service afecten el estado`() = runTest(testDispatcher) {
         repository.onServiceConnected(mockService)
-        testScheduler.advanceUntilIdle()
         repository.onServiceDisconnected()
 
         fakeServiceState.value = MdbState.ReaderEnabled
-        testScheduler.advanceUntilIdle()
 
         assertEquals(MdbState.Idle, repository.state.value)
     }
@@ -85,7 +89,7 @@ class MdbRepositoryImplTest {
     }
 
     @Test fun `beginSession es no-op cuando no hay service`() {
-        repository.beginSession() // no lanza excepción, no hace nada
+        repository.beginSession()
     }
 
     @Test fun `approveVend delega al service cuando está conectado`() {
@@ -108,18 +112,16 @@ class MdbRepositoryImplTest {
         repository.denyVend()
     }
 
-    @Test fun `reconectar service reemplaza la suscripción anterior`() = testScope.runTest {
-        val secondServiceState: MutableStateFlow<MdbState> = MutableStateFlow(MdbState.Idle)
+    @Test fun `reconectar service reemplaza la suscripción anterior`() = runTest(testDispatcher) {
+        val secondServiceState = MutableStateFlow<MdbState>(MdbState.Idle)
         val secondService: MdbService = mockk(relaxed = true) {
             every { state } returns secondServiceState
         }
 
         repository.onServiceConnected(mockService)
-        testScheduler.advanceUntilIdle()
-
         repository.onServiceConnected(secondService)
+
         secondServiceState.value = MdbState.ReaderEnabled
-        testScheduler.advanceUntilIdle()
 
         assertEquals(MdbState.ReaderEnabled, repository.state.value)
     }

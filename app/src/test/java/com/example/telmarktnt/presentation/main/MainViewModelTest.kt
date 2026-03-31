@@ -1,6 +1,7 @@
 package com.example.telmarktnt.presentation.main
 
 import app.cash.turbine.test
+import androidx.lifecycle.viewModelScope
 import com.example.telmarktnt.domain.model.MdbState
 import com.example.telmarktnt.domain.repository.MdbRepository
 import com.example.telmarktnt.domain.usecase.ApproveVendUseCase
@@ -10,9 +11,11 @@ import com.example.telmarktnt.util.MainDispatcherRule
 import io.mockk.every
 import io.mockk.mockk
 import io.mockk.verify
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.runTest
+import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Before
@@ -32,6 +35,7 @@ class MainViewModelTest {
     private lateinit var mockBeginSession: BeginSessionUseCase
     private lateinit var mockApproveVend: ApproveVendUseCase
     private lateinit var mockDenyVend: DenyVendUseCase
+    private lateinit var viewModel: MainViewModel
 
     @Before fun setUp() {
         fakeHardwareState = MutableStateFlow(MdbState.Idle)
@@ -39,22 +43,26 @@ class MainViewModelTest {
         mockBeginSession  = mockk(relaxed = true)
         mockApproveVend   = mockk(relaxed = true)
         mockDenyVend      = mockk(relaxed = true)
+        viewModel = MainViewModel(
+            repository          = mockRepository,
+            beginSessionUseCase = mockBeginSession,
+            approveVendUseCase  = mockApproveVend,
+            denyVendUseCase     = mockDenyVend,
+        )
     }
 
-    private fun buildViewModel() = MainViewModel(
-        repository          = mockRepository,
-        beginSessionUseCase = mockBeginSession,
-        approveVendUseCase  = mockApproveVend,
-        denyVendUseCase     = mockDenyVend,
-    )
+    // Cancela el viewModelScope al acabar cada test para que los collect
+    // del ViewModel no queden como coroutines activas en el TestScope
+    @After fun tearDown() {
+        viewModel.viewModelScope.cancel()
+    }
 
     // ─────────────────────────────────────────────────────────────────────────
     // Estado inicial
     // ─────────────────────────────────────────────────────────────────────────
 
     @Test fun `uiState inicial es Idle`() = runTest {
-        val vm = buildViewModel()
-        assertEquals(MdbState.Idle, vm.uiState.value)
+        assertEquals(MdbState.Idle, viewModel.uiState.value)
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -62,8 +70,7 @@ class MainViewModelTest {
     // ─────────────────────────────────────────────────────────────────────────
 
     @Test fun `uiState refleja cambios normales del hardware inmediatamente`() = runTest {
-        val vm = buildViewModel()
-        vm.uiState.test {
+        viewModel.uiState.test {
             assertEquals(MdbState.Idle, awaitItem())
 
             fakeHardwareState.value = MdbState.ReaderEnabled
@@ -85,27 +92,24 @@ class MainViewModelTest {
     // ─────────────────────────────────────────────────────────────────────────
 
     @Test fun `VendSuccess aparece en uiState inmediatamente`() = runTest {
-        val vm = buildViewModel()
         fakeHardwareState.value = MdbState.VendSuccess
-        assertEquals(MdbState.VendSuccess, vm.uiState.value)
+        assertEquals(MdbState.VendSuccess, viewModel.uiState.value)
     }
 
     @Test fun `uiState revierte al estado hardware después del delay de VendSuccess`() = runTest {
-        val vm = buildViewModel()
         fakeHardwareState.value = MdbState.VendSuccess
         fakeHardwareState.value = MdbState.ReaderEnabled
 
         advanceTimeBy(VEND_SUCCESS_DISPLAY_MS + 1)
 
-        assertEquals(MdbState.ReaderEnabled, vm.uiState.value)
+        assertEquals(MdbState.ReaderEnabled, viewModel.uiState.value)
     }
 
     @Test fun `cambios de hardware durante delay VendSuccess no actualizan uiState`() = runTest {
-        val vm = buildViewModel()
         fakeHardwareState.value = MdbState.VendSuccess
         fakeHardwareState.value = MdbState.ReaderEnabled
 
-        assertEquals(MdbState.VendSuccess, vm.uiState.value)
+        assertEquals(MdbState.VendSuccess, viewModel.uiState.value)
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -113,27 +117,24 @@ class MainViewModelTest {
     // ─────────────────────────────────────────────────────────────────────────
 
     @Test fun `VendDenied aparece en uiState inmediatamente`() = runTest {
-        val vm = buildViewModel()
         fakeHardwareState.value = MdbState.VendDenied
-        assertEquals(MdbState.VendDenied, vm.uiState.value)
+        assertEquals(MdbState.VendDenied, viewModel.uiState.value)
     }
 
     @Test fun `uiState revierte al estado hardware después del delay de VendDenied`() = runTest {
-        val vm = buildViewModel()
         fakeHardwareState.value = MdbState.VendDenied
         fakeHardwareState.value = MdbState.ReaderEnabled
 
         advanceTimeBy(VEND_DENIED_DISPLAY_MS + 1)
 
-        assertEquals(MdbState.ReaderEnabled, vm.uiState.value)
+        assertEquals(MdbState.ReaderEnabled, viewModel.uiState.value)
     }
 
     @Test fun `cambios de hardware durante delay VendDenied no actualizan uiState`() = runTest {
-        val vm = buildViewModel()
         fakeHardwareState.value = MdbState.VendDenied
         fakeHardwareState.value = MdbState.ReaderEnabled
 
-        assertEquals(MdbState.VendDenied, vm.uiState.value)
+        assertEquals(MdbState.VendDenied, viewModel.uiState.value)
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -141,20 +142,17 @@ class MainViewModelTest {
     // ─────────────────────────────────────────────────────────────────────────
 
     @Test fun `startSession invoca BeginSessionUseCase`() = runTest {
-        val vm = buildViewModel()
-        vm.startSession()
+        viewModel.startSession()
         verify(exactly = 1) { mockBeginSession() }
     }
 
     @Test fun `approveVend invoca ApproveVendUseCase`() = runTest {
-        val vm = buildViewModel()
-        vm.approveVend()
+        viewModel.approveVend()
         verify(exactly = 1) { mockApproveVend() }
     }
 
     @Test fun `denyVend invoca DenyVendUseCase`() = runTest {
-        val vm = buildViewModel()
-        vm.denyVend()
+        viewModel.denyVend()
         verify(exactly = 1) { mockDenyVend() }
     }
 
@@ -163,19 +161,17 @@ class MainViewModelTest {
     // ─────────────────────────────────────────────────────────────────────────
 
     @Test fun `VendPending incluye precio e ítem correctos`() = runTest {
-        val vm = buildViewModel()
         val expected = MdbState.VendPending(itemPrice = 250u, itemNumber = 12u)
         fakeHardwareState.value = expected
-        val actual = vm.uiState.value
+        val actual = viewModel.uiState.value
         assertTrue(actual is MdbState.VendPending)
-        assertEquals(250u, (actual as MdbState.VendPending).itemPrice)
-        assertEquals(12u,  actual.itemNumber)
+        assertEquals(250.toUShort(), (actual as MdbState.VendPending).itemPrice)
+        assertEquals(12.toUShort(),  actual.itemNumber)
     }
 
     @Test fun `Error del hardware se propaga a uiState`() = runTest {
-        val vm = buildViewModel()
         fakeHardwareState.value = MdbState.Error("Puerto MDB no disponible")
-        val state = vm.uiState.value
+        val state = viewModel.uiState.value
         assertTrue(state is MdbState.Error)
         assertEquals("Puerto MDB no disponible", (state as MdbState.Error).message)
     }
