@@ -12,16 +12,18 @@ import androidx.core.app.NotificationCompat
 import com.muxunav.telmarktandroid.domain.model.MdbState
 import kotlinx.coroutines.CoroutineName
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.asCoroutineDispatcher
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.channels.BufferOverflow
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import pax.util.MDBManager
 import java.util.concurrent.Executors
-import java.util.concurrent.atomic.AtomicBoolean
-import java.util.concurrent.atomic.AtomicReference
 
 class MdbService : Service() {
 
@@ -30,12 +32,22 @@ class MdbService : Service() {
 
     private var fd: Int = -1
     private var mdbManager: MDBManager? = null
-    private val handler = MdbProtocolHandler()
 
-    private val pendingBeginSession  = AtomicBoolean(false)
-    private val pendingVendApproved  = AtomicReference<ShortArray?>(null)
-    private val awaitingUserApproval = AtomicBoolean(false)
-    private val pendingVendDenied    = AtomicBoolean(false)
+    // Canal de log asíncrono — el thread MDB hace trySend() (no-blocking) y un
+    // coroutine separado en Dispatchers.IO drena y escribe a Logcat.
+    // Así ningún Log.d() bloquea el path crítico de 5ms.
+    private val logChannel = Channel<String>(
+        capacity        = 512,
+        onBufferOverflow = BufferOverflow.DROP_OLDEST,
+    )
+    private val logScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+
+    private val processor = MdbFrameProcessor(
+        handler       = MdbProtocolHandler(),
+        onStateChange = { _state.value = it },
+        onWrite       = { data -> mdbManager?.mdbWrite(fd, data, data.size) },
+        onLog         = { msg -> logChannel.trySend(msg) },
+    )
 
     private val highPriorityExecutor = Executors.newSingleThreadExecutor { runnable ->
         Thread(runnable, "MDB-Thread").apply { priority = Thread.MAX_PRIORITY }
@@ -62,6 +74,8 @@ class MdbService : Service() {
     override fun onCreate() {
         super.onCreate()
         startForeground(NOTIFICATION_ID, buildNotification())
+        logScope.launch { for (msg in logChannel) Log.d("MDB", msg) }
+        Log.i("MDB", "Service created — starting MDB loop")
         startMdbLoop()
     }
 
@@ -69,19 +83,16 @@ class MdbService : Service() {
         super.onDestroy()
         mdbManager?.let { if (fd >= 0) it.mdbClose(fd) }
         highPriorityExecutor.shutdown()
+        logChannel.close()
+        logScope.cancel()
+        Log.i("MDB", "Service destroyed")
     }
 
     // ── API pública ───────────────────────────────────────────────────────────
 
-    fun beginSession() { pendingBeginSession.set(true) }
-
-    fun approveVend() { awaitingUserApproval.set(false) }
-
-    fun denyVend() {
-        pendingVendApproved.set(null)
-        awaitingUserApproval.set(false)
-        pendingVendDenied.set(true)
-    }
+    fun beginSession() = processor.beginSession()
+    fun approveVend()  = processor.approveVend()
+    fun denyVend()     = processor.denyVend()
 
     // ── Loop MDB ──────────────────────────────────────────────────────────────
 
@@ -90,9 +101,10 @@ class MdbService : Service() {
             mdbManager = MDBManager(applicationContext)
             val readBuffer = ShortArray(256)
 
+            Log.i("MDB", "Opening /dev/mdb_slave...")
             fd = mdbManager!!.mdbOpen("/dev/mdb_slave")
             if (fd < 0) {
-                Log.e("MDB", "Error abriendo /dev/mdb_slave")
+                Log.e("MDB", "Failed to open /dev/mdb_slave (fd=$fd)")
                 _state.value = MdbState.Error("No se pudo abrir el puerto MDB")
                 return@launch
             }
@@ -100,105 +112,17 @@ class MdbService : Service() {
             mdbManager!!.mdbSetMode(fd, 1)
             val addressBytes = byteArrayOf(0x10.toByte())
             mdbManager!!.mdbpSetAddr(fd, addressBytes, addressBytes.size)
+            Log.i("MDB", "Port open (fd=$fd) — loop running")
 
             while (true) {
+                val ts = System.currentTimeMillis()
                 val wordsRead = mdbManager!!.mdbRead(fd, readBuffer, readBuffer.size, 50000, 1500, 0)
                 if (wordsRead > 0) {
-                    val ts = System.currentTimeMillis()
-                    handleFrame(fd, mdbManager!!, readBuffer, wordsRead, ts)
+                    processor.processFrame(readBuffer, wordsRead)
+                    // trySend es no-blocking: el timing log se escribe fuera del thread MDB
+                    //logChannel.trySend("⏱ response: ${System.currentTimeMillis() - ts}ms")
                 }
             }
-        }
-    }
-
-    private fun handleFrame(fd: Int, mgr: MDBManager, buffer: ShortArray, wordsRead: Int, ts: Long) {
-        when (val frame = handler.parseFrame(buffer, wordsRead)) {
-            is MdbFrame.SetupConfig -> {
-                mgr.mdbWrite(fd, handler.readerConfigData, handler.readerConfigData.size)
-                Log.i("MDB", "SETUP response: ${System.currentTimeMillis() - ts}ms")
-            }
-            is MdbFrame.Poll -> {
-                when {
-                    pendingBeginSession.getAndSet(false) -> {
-                        mgr.mdbWrite(fd, handler.beginSessionData, handler.beginSessionData.size)
-                        _state.value = MdbState.SessionActive
-                        Log.i("MDB", "Begin Session sent on POLL: ${System.currentTimeMillis() - ts}ms")
-                    }
-                    pendingVendDenied.getAndSet(false) -> {
-                        mgr.mdbWrite(fd, handler.vendDenied, handler.vendDenied.size)
-                        _state.value = MdbState.VendDenied
-                        Log.i("MDB", "Vend Denied sent on POLL: ${System.currentTimeMillis() - ts}ms")
-                    }
-                    !awaitingUserApproval.get() && pendingVendApproved.get() != null -> {
-                        val va = pendingVendApproved.getAndSet(null)!!
-                        mgr.mdbWrite(fd, va, va.size)
-                        Log.i("MDB", "Vend Approved sent on POLL: ${System.currentTimeMillis() - ts}ms")
-                    }
-                    else -> mgr.mdbWrite(fd, handler.ackData, handler.ackData.size)
-                }
-            }
-            is MdbFrame.ReaderEnable -> {
-                mgr.mdbWrite(fd, handler.ackData, handler.ackData.size)
-                _state.value = MdbState.ReaderEnabled
-                Log.i("MDB", "Reader ENABLE: ${System.currentTimeMillis() - ts}ms")
-            }
-            is MdbFrame.ReaderDisable -> {
-                mgr.mdbWrite(fd, handler.ackData, handler.ackData.size)
-                _state.value = MdbState.Idle
-                Log.i("MDB", "Reader DISABLE: ${System.currentTimeMillis() - ts}ms")
-            }
-            is MdbFrame.RevalueRequestLimit -> {
-                mgr.mdbWrite(fd, handler.revalueLimitAmount, handler.revalueLimitAmount.size)
-                Log.i("MDB", "Revalue Limit: ${System.currentTimeMillis() - ts}ms")
-            }
-            is MdbFrame.PeripheralId -> {
-                mgr.mdbWrite(fd, handler.peripheralId, handler.peripheralId.size)
-                Log.i("MDB", "Peripheral ID: ${System.currentTimeMillis() - ts}ms")
-            }
-            is MdbFrame.SetupMinMaxPrices -> {
-                mgr.mdbWrite(fd, handler.ackData, handler.ackData.size)
-                Log.i("MDB", "Min/Max prices: ${System.currentTimeMillis() - ts}ms")
-            }
-            is MdbFrame.VendRequest -> {
-                mgr.mdbWrite(fd, handler.ackData, handler.ackData.size)
-                val va = handler.buildVendApproved(frame.amountHigh, frame.amountLow)
-                pendingVendApproved.set(va)
-                awaitingUserApproval.set(true)
-                _state.value = MdbState.VendPending(
-                    itemPrice  = frame.itemPrice,
-                    itemNumber = frame.itemNumber,
-                )
-                Log.i("MDB", "Vend Request → ACK: ${System.currentTimeMillis() - ts}ms")
-            }
-            is MdbFrame.VendCancel -> {
-                pendingVendApproved.set(null)
-                awaitingUserApproval.set(false)
-                mgr.mdbWrite(fd, handler.vendDenied, handler.vendDenied.size)
-                _state.value = MdbState.ReaderEnabled
-                Log.i("MDB", "Vend Cancel: ${System.currentTimeMillis() - ts}ms")
-            }
-            is MdbFrame.VendSuccess -> {
-                mgr.mdbWrite(fd, handler.ackData, handler.ackData.size)
-                _state.value = MdbState.VendSuccess
-                Log.i("MDB", "Vend Success: ${System.currentTimeMillis() - ts}ms")
-            }
-            is MdbFrame.VendFailure -> {
-                mgr.mdbWrite(fd, handler.ackData, handler.ackData.size)
-                _state.value = MdbState.ReaderEnabled
-                Log.i("MDB", "Vend Failure: ${System.currentTimeMillis() - ts}ms")
-            }
-            is MdbFrame.Reset -> {
-                mgr.mdbWrite(fd, handler.ackData, handler.ackData.size)
-                _state.value = MdbState.Idle
-                Log.i("MDB", "Reset: ${System.currentTimeMillis() - ts}ms")
-            }
-            is MdbFrame.VendSessionComplete -> {
-                mgr.mdbWrite(fd, handler.vendEndSession, handler.vendEndSession.size)
-                _state.value = MdbState.ReaderEnabled
-                Log.i("MDB", "Session Complete: ${System.currentTimeMillis() - ts}ms")
-            }
-            is MdbFrame.Ack     -> Log.i("MDB", "ACK received")
-            is MdbFrame.Unknown -> Unit
         }
     }
 
