@@ -28,6 +28,7 @@ import com.muxunav.telmarktandroid.data.mdb.MdbRepositoryImpl
 import com.muxunav.telmarktandroid.data.mdb.MdbService
 import com.muxunav.telmarktandroid.domain.model.MdbState
 import com.muxunav.telmarktandroid.presentation.main.MainViewModel
+import com.muxunav.telmarktandroid.presentation.startup.StartupViewModel
 import com.muxunav.telmarktandroid.presentation.ui.color.DarkMuxuColors
 import com.muxunav.telmarktandroid.presentation.ui.color.LocalMuxuColors
 import com.muxunav.telmarktandroid.presentation.ui.screens.AgeSelectionScreen
@@ -36,6 +37,7 @@ import com.muxunav.telmarktandroid.presentation.ui.screens.NfcReadingScreen
 import com.muxunav.telmarktandroid.presentation.ui.screens.ProductDispensedScreen
 import com.muxunav.telmarktandroid.presentation.ui.screens.ProductVerifyScreen
 import com.muxunav.telmarktandroid.presentation.ui.screens.SelectProductScreen
+import com.muxunav.telmarktandroid.presentation.ui.screens.StartupScreen
 import com.muxunav.telmarktandroid.presentation.ui.screens.TapToStartScreen
 import com.muxunav.telmarktandroid.presentation.ui.screens.VendDeniedScreen
 import com.muxunav.telmarktandroid.presentation.ui.screens.VendRequestScreen
@@ -47,13 +49,10 @@ import javax.inject.Inject
 @AndroidEntryPoint
 class MainActivity : ComponentActivity() {
 
-    // MdbRepositoryImpl inyectado directamente (no la interfaz) para poder
-    // llamar a onServiceConnected/onServiceDisconnected desde el ServiceConnection.
-    // El ViewModel usa la interfaz MdbRepository — la dependencia a la impl queda
-    // contenida exclusivamente aquí.
     @Inject lateinit var mdbRepository: MdbRepositoryImpl
 
-    private val viewModel: MainViewModel by viewModels()
+    private val mainViewModel: MainViewModel by viewModels()
+    private val startupViewModel: StartupViewModel by viewModels()
 
     private val serviceConnection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName?, binder: IBinder?) {
@@ -79,55 +78,71 @@ class MainActivity : ComponentActivity() {
         }
 
         setContent {
-            val mdbState by viewModel.uiState.collectAsStateWithLifecycle()
+            val startupState by startupViewModel.uiState.collectAsStateWithLifecycle()
+            val mdbState by mainViewModel.uiState.collectAsStateWithLifecycle()
             var canInput by remember { mutableStateOf("") }
-
-            val currentScreen = when (mdbState) {
-                is MdbState.Idle -> AppScreen.TAP_TO_START
-                is MdbState.ReaderEnabled -> AppScreen.TAP_TO_START
-                is MdbState.SessionActive -> AppScreen.SELECT_PRODUCT
-                is MdbState.VendPending -> AppScreen.VEND_REQUEST
-                is MdbState.VendSuccess -> AppScreen.DISPENSED
-                is MdbState.VendDenied -> AppScreen.VEND_DENIED
-                is MdbState.Error -> AppScreen.TAP_TO_START
-            }
 
             CompositionLocalProvider(LocalMuxuColors provides DarkMuxuColors) {
                 Scaffold(modifier = Modifier.fillMaxSize()) { innerPadding ->
+
+                    // Nivel superior: startup bloqueante hasta que la config esté lista
+                    if (startupState !is StartupViewModel.UiState.Done) {
+                        StartupScreen(
+                            title = "TELMARKT",
+                            steps = when (val s = startupState) {
+                                is StartupViewModel.UiState.Running -> s.steps
+                                else -> emptyList()
+                            },
+                        )
+                        return@Scaffold
+                    }
+
+                    // Startup completado — routing normal basado en estado MDB
+                    val currentScreen = when (mdbState) {
+                        is MdbState.Idle          -> AppScreen.TAP_TO_START
+                        is MdbState.ReaderEnabled -> AppScreen.TAP_TO_START
+                        is MdbState.SessionActive -> AppScreen.SELECT_PRODUCT
+                        is MdbState.VendPending   -> AppScreen.VEND_REQUEST
+                        is MdbState.VendSuccess   -> AppScreen.DISPENSED
+                        is MdbState.VendDenied    -> AppScreen.VEND_DENIED
+                        is MdbState.Error         -> AppScreen.TAP_TO_START
+                    }
+
                     when (currentScreen) {
                         AppScreen.TAP_TO_START -> TapToStartScreen(
                             innerPadding = innerPadding,
                             readerEnabled = mdbState is MdbState.ReaderEnabled,
-                            onStartSession = viewModel::startSession
+                            onStartSession = mainViewModel::startSession
                         )
-                        AppScreen.SELECT_PRODUCT -> SelectProductScreen(innerPadding)
-                        AppScreen.VEND_REQUEST -> {
+                        AppScreen.SELECT_PRODUCT  -> SelectProductScreen(innerPadding)
+                        AppScreen.VEND_REQUEST    -> {
                             val vend = mdbState as? MdbState.VendPending
                             VendRequestScreen(
                                 innerPadding = innerPadding,
-                                itemPrice = vend?.itemPrice ?: 0u,
-                                itemNumber = vend?.itemNumber ?: 0u,
-                                onApprove = viewModel::approveVend,
-                                onDeny = viewModel::denyVend
+                                itemPrice    = vend?.itemPrice ?: 0u,
+                                itemNumber   = vend?.itemNumber ?: 0u,
+                                onApprove    = mainViewModel::approveVend,
+                                onDeny       = mainViewModel::denyVend
                             )
                         }
-                        AppScreen.DISPENSED -> ProductDispensedScreen(innerPadding)
-                        AppScreen.VEND_DENIED -> VendDeniedScreen(innerPadding)
+                        AppScreen.DISPENSED       -> ProductDispensedScreen(innerPadding)
+                        AppScreen.VEND_DENIED     -> VendDeniedScreen(innerPadding)
                         AppScreen.VERIFY_TO_START -> VerifyToStartScreen(innerPadding)
                         AppScreen.VERIFY_REQUIRED -> VerifyRequiredScreen(innerPadding)
-                        AppScreen.SELECTION -> AgeSelectionScreen(innerPadding)
-                        AppScreen.CAN_INPUT -> CanInputScreen(
+                        AppScreen.SELECTION       -> AgeSelectionScreen(innerPadding)
+                        AppScreen.CAN_INPUT       -> CanInputScreen(
                             innerPadding = innerPadding,
-                            canInput = canInput,
-                            onCanChange = { canInput = it },
-                            onConfirmed = { canInput = canInput }
+                            canInput     = canInput,
+                            onCanChange  = { canInput = it },
+                            onConfirmed  = { canInput = canInput }
                         )
-                        AppScreen.NFC_READING -> NfcReadingScreen(
+                        AppScreen.NFC_READING     -> NfcReadingScreen(
                             innerPadding = innerPadding,
-                            canInput = canInput,
-                            onBackToCan = {}
+                            canInput     = canInput,
+                            onBackToCan  = {}
                         )
-                        AppScreen.PRODUCT_VERIFY -> ProductVerifyScreen(innerPadding)
+                        AppScreen.PRODUCT_VERIFY  -> ProductVerifyScreen(innerPadding)
+                        AppScreen.STARTUP         -> Unit // inalcanzable — gestionado arriba
                     }
                 }
             }
@@ -141,21 +156,13 @@ class MainActivity : ComponentActivity() {
 
     private fun hideSystemUI() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            // 1. Permitimos que el contenido se dibuje detrás de las barras (layout fullscreen)
             window.setDecorFitsSystemWindows(false)
-
             window.insetsController?.let { controller ->
-                // 2. Escondemos SOLO las Navigation Bars (atrás, home, etc.)
                 controller.hide(WindowInsets.Type.navigationBars())
-
-                // 3. Importante: que no se esconda la de arriba (Status Bars)
                 controller.show(WindowInsets.Type.statusBars())
-
-                // 4. Comportamiento: Si el usuario desliza desde abajo, aparecen un momento y se van
                 controller.systemBarsBehavior = WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
             }
         } else {
-            // Retrocompatibilidad para tu minSdk 24
             @Suppress("DEPRECATION")
             window.decorView.systemUiVisibility = (View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
                     or View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY)

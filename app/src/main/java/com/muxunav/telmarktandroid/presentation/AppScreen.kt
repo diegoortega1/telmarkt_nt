@@ -1,6 +1,7 @@
 package com.muxunav.telmarktandroid.presentation
 
 enum class AppScreen {
+    STARTUP,
     TAP_TO_START,
     VERIFY_TO_START,
     VERIFY_REQUIRED,
