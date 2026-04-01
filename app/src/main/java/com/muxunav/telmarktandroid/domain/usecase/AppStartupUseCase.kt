@@ -13,6 +13,7 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 import javax.inject.Inject
 
+private const val DONE_DISPLAY_MS  = 800L
 private const val ERROR_DISPLAY_MS = 2_000L
 
 class AppStartupUseCase @Inject constructor(
@@ -33,6 +34,7 @@ class AppStartupUseCase @Inject constructor(
         val config: AppConfig = try {
             val c = syncServerInfoUseCase()
             emit(AppStartupResult.InProgress(update("server_sync", DONE)))
+            delay(DONE_DISPLAY_MS)
             c
         } catch (e: Exception) {
             emit(AppStartupResult.InProgress(update("server_sync", ERROR, e.message)))
