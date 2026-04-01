@@ -40,7 +40,7 @@ data class ServerInfoRequest(
         sb.append(icc.padLeft(20))
         sb.append(imei.padLeft(15))
         sb.append(signalLevel.padLeft(2))
-        sb.append(specialInfo.byteValue.toInt().toChar())
+        sb.append(('0' + specialInfo.byteValue.toInt()).toChar())
         sb.append(ipAddress)
         sb.append(SEPARATOR)
         frequencyBand?.let { sb.append(it) }

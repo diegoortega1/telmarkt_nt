@@ -39,9 +39,9 @@ data class VmcDataRequest(
     override fun serialize(): ByteArray {
         val sb = StringBuilder()
         sb.append(manufacturer.padRight(3))
-        sb.append(serialNumber.padLeft(12))
-        sb.append(model.padLeft(12))
-        sb.append(firmwareVersion.padLeft(5))
+        sb.append(serialNumber.padLeft(12, ' '))
+        sb.append(model.padLeft(12, ' '))
+        sb.append(firmwareVersion.padLeft(5, ' '))
         sb.append(featureLevel)
         sb.append(displayColumns.padLeft(2))
         sb.append(displayRows.padLeft(2))
