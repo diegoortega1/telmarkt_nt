@@ -8,9 +8,12 @@ import com.muxunav.telmarktandroid.domain.model.SequentialStep.StepStatus.ERROR
 import com.muxunav.telmarktandroid.domain.model.SequentialStep.StepStatus.PENDING
 import com.muxunav.telmarktandroid.domain.model.SequentialStep.StepStatus.RUNNING
 import com.muxunav.telmarktandroid.domain.repository.AppConfigRepository
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 import javax.inject.Inject
+
+private const val ERROR_DISPLAY_MS = 2_000L
 
 class AppStartupUseCase @Inject constructor(
     private val syncServerInfoUseCase: SyncServerInfoUseCase,
@@ -33,6 +36,7 @@ class AppStartupUseCase @Inject constructor(
             c
         } catch (e: Exception) {
             emit(AppStartupResult.InProgress(update("server_sync", ERROR, e.message)))
+            delay(ERROR_DISPLAY_MS)   // el usuario puede leer qué falló antes de continuar
             appConfigRepository.getLastOrDefault()
         }
 
